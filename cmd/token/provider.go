@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"os"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -27,6 +28,7 @@ import (
 	"github.com/markkurossi/crypto/pkcs7"
 	"github.com/markkurossi/go-libs/uuid"
 	"github.com/markkurossi/pkcs11-provider/pkcs11"
+	pk11 "github.com/miekg/pkcs11"
 )
 
 var (
@@ -203,6 +205,25 @@ type Provider struct {
 
 // Initialize implements pkcs11.Provider.Initialize().
 func (p *Provider) Initialize() (*pkcs11.InitializeResp, error) {
+
+	pkcs11LibraryPath := "/usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so"
+	if p11 := os.Getenv("SOFTHSM2_LIBRARY_PATH"); p11 != "" {
+		pkcs11LibraryPath = p11
+	}
+
+	pkcs11Lib = pk11.New(pkcs11LibraryPath)
+	err := pkcs11Lib.Initialize()
+	if err != nil {
+		log.Fatalf("failed to initialize %s: %v", pkcs11LibraryPath, err)
+	} else {
+		log.Printf("init lib %s", pkcs11LibraryPath)
+	}
+	// note : slot is just 0; should be calculated
+	err = pkcs11Lib.InitToken(0, "1111", "my_label")
+	if err != nil {
+		panic(err)
+	}
+
 	p.loggedIn = false
 	p.state = defaultState
 
@@ -419,6 +440,11 @@ func (p *Provider) Login(req *pkcs11.LoginReq) error {
 
 	default:
 		p.parent.state = pkcs11.CksROPublicSession
+	}
+
+	err := pkcs11Lib.Login(pkcs11LibSession, pk11.CKU_USER, "1111")
+	if err != nil {
+		panic(err)
 	}
 
 	return nil

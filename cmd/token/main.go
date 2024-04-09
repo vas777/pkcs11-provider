@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"github.com/markkurossi/pkcs11-provider/pkcs11"
+	pk11 "github.com/miekg/pkcs11"
 )
 
 const (
@@ -49,6 +50,8 @@ var (
 		h |= FlagToken
 		return h, nil
 	})
+	pkcs11Lib        *pk11.Ctx
+	pkcs11LibSession pk11.SessionHandle
 )
 
 func allocObjectHandle() (pkcs11.ObjectHandle, error) {
@@ -190,10 +193,50 @@ type FindObjects struct {
 // NewSession creates a new session instance.
 func NewSession() (*Session, error) {
 	var buf [4]byte
+	var slot, slotID uint
 
 	m.Lock()
 	defer m.Unlock()
 
+	slots, err := pkcs11Lib.GetSlotList(true)
+	if err != nil {
+		panic(err)
+	}
+	log.Printf("slots is %d", slots)
+	slot = slots[0]
+	slotID = slot
+
+	// slotInfo, err := pkcs11Lib.GetSlotInfo(slotID)
+	// if err != nil {
+	// 	log.Fatalf("failed to get slot %d info: %v", slotID, err)
+	// }
+
+	// tokenInfo, err := pkcs11Lib.GetTokenInfo(slotID)
+	// if err != nil {
+	// 	log.Fatalf("failed to get slot %d token info: %v", slotID, err)
+	// }
+
+	slot = slotID
+
+	pkcs11LibSession, err = pkcs11Lib.OpenSession(0, pk11.CKF_SERIAL_SESSION|pk11.CKF_RW_SESSION)
+	if err != nil {
+		panic(err)
+	}
+
+	err = pkcs11Lib.Login(pkcs11LibSession, pk11.CKU_SO, "1111")
+	if err != nil {
+		panic(err)
+	}
+
+	err = pkcs11Lib.InitPIN(pkcs11LibSession, "1111")
+	if err != nil {
+		panic(err)
+	}
+
+	err =  pkcs11Lib.Logout(pkcs11LibSession)
+	if err != nil {
+		panic(err)
+	}
 	for {
 		_, err := rand.Read(buf[:])
 		if err != nil {

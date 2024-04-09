@@ -7,4 +7,5 @@ require (
 	github.com/markkurossi/go-libs v0.0.0-20230221114805-99434bc3be1b
 	github.com/markkurossi/tabulate v0.0.0-20230223130100-d4965869b123
 	golang.org/x/text v0.8.0 // indirect
+	github.com/miekg/pkcs11 v1.0.3
 )
