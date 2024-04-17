@@ -14,6 +14,7 @@ import (
 	"crypto/sha512"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"hash"
 	"io"
@@ -50,8 +51,9 @@ var (
 		h |= FlagToken
 		return h, nil
 	})
-	pkcs11Lib        *pk11.Ctx
-	pkcs11LibSession pk11.SessionHandle
+	pkcs11LibraryPath = "/usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so"
+	pkcs11Lib         *pk11.Ctx
+	pkcs11LibSession  pk11.SessionHandle
 )
 
 func allocObjectHandle() (pkcs11.ObjectHandle, error) {
@@ -193,66 +195,35 @@ type FindObjects struct {
 // NewSession creates a new session instance.
 func NewSession() (*Session, error) {
 	var buf [4]byte
-	var slot, slotID uint
 
 	m.Lock()
 	defer m.Unlock()
 
-	slots, err := pkcs11Lib.GetSlotList(true)
-	if err != nil {
-		panic(err)
-	}
-	log.Printf("slots is %d", slots)
-	slot = slots[0]
-	slotID = slot
-
-	// slotInfo, err := pkcs11Lib.GetSlotInfo(slotID)
-	// if err != nil {
-	// 	log.Fatalf("failed to get slot %d info: %v", slotID, err)
-	// }
-
-	// tokenInfo, err := pkcs11Lib.GetTokenInfo(slotID)
-	// if err != nil {
-	// 	log.Fatalf("failed to get slot %d token info: %v", slotID, err)
-	// }
-
-	slot = slotID
-
-	pkcs11LibSession, err = pkcs11Lib.OpenSession(0, pk11.CKF_SERIAL_SESSION|pk11.CKF_RW_SESSION)
+	pkcs11LibSession, err := pkcs11Lib.OpenSession(0, pk11.CKF_SERIAL_SESSION|pk11.CKF_RW_SESSION)
 	if err != nil {
 		panic(err)
 	}
 
-	err = pkcs11Lib.Login(pkcs11LibSession, pk11.CKU_SO, "1111")
 	if err != nil {
 		panic(err)
 	}
 
-	err = pkcs11Lib.InitPIN(pkcs11LibSession, "1111")
-	if err != nil {
-		panic(err)
-	}
-
-	err =  pkcs11Lib.Logout(pkcs11LibSession)
-	if err != nil {
-		panic(err)
-	}
 	for {
 		_, err := rand.Read(buf[:])
 		if err != nil {
 			return nil, pkcs11.ErrDeviceError
 		}
-		id := pkcs11.SessionHandle(bo.Uint32(buf[:]))
+		// id := pkcs11.SessionHandle(bo.Uint32(buf[:]))
 
-		_, ok := sessions[id]
+		_, ok := sessions[pkcs11.SessionHandle(pkcs11LibSession)]
 		if ok {
 			continue
 		}
 		session := &Session{
-			ID:      id,
+			ID:      pkcs11.SessionHandle(pkcs11LibSession),
 			Objects: make(map[pkcs11.ObjectHandle]pkcs11.Storage),
 		}
-		sessions[id] = session
+		sessions[pkcs11.SessionHandle(pkcs11LibSession)] = session
 		return session, nil
 	}
 }
@@ -295,6 +266,18 @@ func main() {
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		log.Fatalf("failed to create listener: %s", err)
+	}
+
+	if p11 := os.Getenv("SOFTHSM2_LIBRARY_PATH"); p11 != "" {
+		pkcs11LibraryPath = p11
+	}
+	if _, err := os.Stat(pkcs11LibraryPath); errors.Is(err, os.ErrNotExist) {
+		log.Fatalf("lib not found %s", pkcs11LibraryPath)
+	}
+
+	pkcs11Lib = pk11.New(pkcs11LibraryPath)
+	if pkcs11Lib == nil {
+		log.Fatalf("could not init with %s", pkcs11LibraryPath)
 	}
 
 	for {

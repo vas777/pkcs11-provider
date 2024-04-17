@@ -19,7 +19,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
-	"os"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -206,12 +205,6 @@ type Provider struct {
 // Initialize implements pkcs11.Provider.Initialize().
 func (p *Provider) Initialize() (*pkcs11.InitializeResp, error) {
 
-	pkcs11LibraryPath := "/usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so"
-	if p11 := os.Getenv("SOFTHSM2_LIBRARY_PATH"); p11 != "" {
-		pkcs11LibraryPath = p11
-	}
-
-	pkcs11Lib = pk11.New(pkcs11LibraryPath)
 	err := pkcs11Lib.Initialize()
 	if err != nil {
 		log.Fatalf("failed to initialize %s: %v", pkcs11LibraryPath, err)
@@ -223,6 +216,29 @@ func (p *Provider) Initialize() (*pkcs11.InitializeResp, error) {
 	if err != nil {
 		panic(err)
 	}
+
+	slots, err := pkcs11Lib.GetSlotList(true)
+	if err != nil {
+		panic(err)
+	}
+	log.Printf("slots is %d", slots)
+
+	pkcs11LibSession, err = pkcs11Lib.OpenSession(0, pk11.CKF_SERIAL_SESSION|pk11.CKF_RW_SESSION)
+	if err != nil {
+		panic(err)
+	}
+
+	err = pkcs11Lib.Login(pkcs11LibSession, pk11.CKU_SO, "1111")
+	if err != nil {
+		panic(err)
+	}
+
+	err = pkcs11Lib.InitPIN(pkcs11LibSession, "1111")
+	if err != nil {
+		panic(err)
+	}
+
+	err = pkcs11Lib.Logout(pkcs11LibSession)
 
 	p.loggedIn = false
 	p.state = defaultState
@@ -322,15 +338,39 @@ func (p *Provider) GetMechanismList(req *pkcs11.GetMechanismListReq) (*pkcs11.Ge
 
 // GetMechanismInfo implements the Provider.GetMechanismInfo().
 func (p *Provider) GetMechanismInfo(req *pkcs11.GetMechanismInfoReq) (*pkcs11.GetMechanismInfoResp, error) {
+	var m []*pk11.Mechanism
+
+	// Create Mechanism structs
+	m1 := &pk11.Mechanism{
+		Mechanism: uint(req.Type),
+		Parameter: nil,
+		// generator: nil,
+	}
+
+	// Append pointers to Mechanism structs to the slice
+	m = append(m, m1)
+
 	if req.SlotID != 0 {
 		return nil, pkcs11.ErrSlotIDInvalid
 	}
-	info, ok := mechanisms[req.Type]
-	if !ok {
+	// info, ok := mechanisms[req.Type]
+	// if !ok {
+	// 	return nil, pkcs11.ErrMechanismInvalid
+	// }
+	var slot uint = 0
+	libInfo, err := pkcs11Lib.GetMechanismInfo(slot, m)
+	if err != nil {
 		return nil, pkcs11.ErrMechanismInvalid
 	}
+
+	resp := pkcs11.MechanismInfo{
+		MinKeySize: pkcs11.Ulong(libInfo.MinKeySize),
+		MaxKeySize: pkcs11.Ulong(libInfo.MaxKeySize),
+		Flags:      pkcs11.Flags(libInfo.Flags),
+	}
+
 	return &pkcs11.GetMechanismInfoResp{
-		Info: info,
+		Info: resp,
 	}, nil
 }
 
@@ -1336,6 +1376,25 @@ func (p *Provider) DigestInit(req *pkcs11.DigestInitReq) error {
 		return pkcs11.ErrOperationActive
 	}
 
+	var m []*pk11.Mechanism
+
+	// Create Mechanism structs
+	m1 := &pk11.Mechanism{
+		Mechanism: uint(req.Mechanism.Mechanism),
+		Parameter: nil,
+		// generator: nil,
+	}
+
+	// Append pointers to Mechanism structs to the slice
+	m = append(m, m1)
+
+	libDigestInit := pkcs11Lib.DigestInit(pkcs11LibSession, m)
+
+	if libDigestInit != nil {
+		// return pkcs11.ErrMechanismInvalid
+		panic(libDigestInit)
+	}
+	// reuse this to store type of
 	switch req.Mechanism.Mechanism {
 	case pkcs11.CkmSHA224:
 		p.session.Digest = sha256.New224()
@@ -1368,14 +1427,28 @@ func (p *Provider) Digest(req *pkcs11.DigestReq) (*pkcs11.DigestResp, error) {
 	if hash == nil {
 		return nil, pkcs11.ErrOperationNotInitialized
 	}
+	// spec: if no size of digest (input) provided
+	// return size of hash (size of output).
 	resp := &pkcs11.DigestResp{
 		DigestLen: hash.Size(),
 	}
 	if req.DigestSize == 0 {
 		return resp, nil
 	}
+
+	var m []byte = req.Data
+
+	libDigest, err := pkcs11Lib.Digest(pkcs11LibSession, m)
+
+	if err != nil {
+		panic(err)
+	}
+
 	hash.Write(req.Data)
-	resp.Digest = hash.Sum(nil)
+	resp.Digest = libDigest
+
+	// log.Printf("hash: %s", hash.Sum(nil))
+	// log.Printf("libDigest: %s", libDigest)
 	p.session.Digest = nil
 
 	return resp, nil
