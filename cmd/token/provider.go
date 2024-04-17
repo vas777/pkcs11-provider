@@ -208,37 +208,7 @@ func (p *Provider) Initialize() (*pkcs11.InitializeResp, error) {
 	err := pkcs11Lib.Initialize()
 	if err != nil {
 		log.Fatalf("failed to initialize %s: %v", pkcs11LibraryPath, err)
-	} else {
-		log.Printf("init lib %s", pkcs11LibraryPath)
 	}
-	// note : slot is just 0; should be calculated
-	err = pkcs11Lib.InitToken(0, "1111", "my_label")
-	if err != nil {
-		panic(err)
-	}
-
-	slots, err := pkcs11Lib.GetSlotList(true)
-	if err != nil {
-		panic(err)
-	}
-	log.Printf("slots is %d", slots)
-
-	pkcs11LibSession, err = pkcs11Lib.OpenSession(0, pk11.CKF_SERIAL_SESSION|pk11.CKF_RW_SESSION)
-	if err != nil {
-		panic(err)
-	}
-
-	err = pkcs11Lib.Login(pkcs11LibSession, pk11.CKU_SO, "1111")
-	if err != nil {
-		panic(err)
-	}
-
-	err = pkcs11Lib.InitPIN(pkcs11LibSession, "1111")
-	if err != nil {
-		panic(err)
-	}
-
-	err = pkcs11Lib.Logout(pkcs11LibSession)
 
 	p.loggedIn = false
 	p.state = defaultState
@@ -278,6 +248,7 @@ func (p *Provider) GetInfo() (*pkcs11.GetInfoResp, error) {
 
 // GetSlotList implements the Provider.GetSlotList().
 func (p *Provider) GetSlotList(req *pkcs11.GetSlotListReq) (*pkcs11.GetSlotListResp, error) {
+	pkcs11Lib.GetSlotList(true)
 	return &pkcs11.GetSlotListResp{
 		SlotListLen: 1,
 		SlotList:    []pkcs11.SlotID{0},
@@ -350,15 +321,7 @@ func (p *Provider) GetMechanismInfo(req *pkcs11.GetMechanismInfoReq) (*pkcs11.Ge
 	// Append pointers to Mechanism structs to the slice
 	m = append(m, m1)
 
-	if req.SlotID != 0 {
-		return nil, pkcs11.ErrSlotIDInvalid
-	}
-	// info, ok := mechanisms[req.Type]
-	// if !ok {
-	// 	return nil, pkcs11.ErrMechanismInvalid
-	// }
-	var slot uint = 0
-	libInfo, err := pkcs11Lib.GetMechanismInfo(slot, m)
+	libInfo, err := pkcs11Lib.GetMechanismInfo(pkcs11LibEffectiveSlotID, m)
 	if err != nil {
 		return nil, pkcs11.ErrMechanismInvalid
 	}

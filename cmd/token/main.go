@@ -51,9 +51,10 @@ var (
 		h |= FlagToken
 		return h, nil
 	})
-	pkcs11LibraryPath = "/usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so"
-	pkcs11Lib         *pk11.Ctx
-	pkcs11LibSession  pk11.SessionHandle
+	pkcs11LibraryPath        = "/usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so"
+	pkcs11Lib                *pk11.Ctx
+	pkcs11LibSession         pk11.SessionHandle
+	pkcs11LibEffectiveSlotID uint
 )
 
 func allocObjectHandle() (pkcs11.ObjectHandle, error) {
@@ -199,7 +200,7 @@ func NewSession() (*Session, error) {
 	m.Lock()
 	defer m.Unlock()
 
-	pkcs11LibSession, err := pkcs11Lib.OpenSession(0, pk11.CKF_SERIAL_SESSION|pk11.CKF_RW_SESSION)
+	pkcs11LibSession, err := pkcs11Lib.OpenSession(pkcs11LibEffectiveSlotID, pk11.CKF_SERIAL_SESSION|pk11.CKF_RW_SESSION)
 	if err != nil {
 		panic(err)
 	}
@@ -279,6 +280,32 @@ func main() {
 	if pkcs11Lib == nil {
 		log.Fatalf("could not init with %s", pkcs11LibraryPath)
 	}
+	// init token as softhsm2-util will do
+	// first uninitialized slot is found
+	// then token is initialized to used that slot
+	// library reloaded to get new slotid
+	// slotid might change but we have tokeninfo
+	// so we could correctly find our original token with new id
+	err = pkcs11Lib.Initialize()
+	if err != nil {
+		log.Fatalf("failed to initialize %s: %v", pkcs11LibraryPath, err)
+	} else {
+		log.Printf("init lib %s", pkcs11LibraryPath)
+	}
+
+	slot := findFreeSlot()
+	pkcs11LibEffectiveSlotID = initToken(slot)
+
+	if slot == pkcs11LibEffectiveSlotID {
+		log.Printf("The token has been initialized on slot %d\n", pkcs11LibEffectiveSlotID)
+	} else {
+		log.Printf("The token has been initialized and is reassigned to slot %d\n", pkcs11LibEffectiveSlotID)
+	}
+
+	err = pkcs11Lib.Finalize()
+	if err != nil {
+		log.Fatalf("failed to finalize %s: %v", pkcs11LibraryPath, err)
+	}
 
 	for {
 		conn, err := listener.Accept()
@@ -295,6 +322,93 @@ func main() {
 			conn.Close()
 		}(conn)
 	}
+}
+
+func findFreeSlot() uint {
+	var res uint
+	slots, err := pkcs11Lib.GetSlotList(true)
+	if err != nil {
+		panic(err)
+	}
+
+	for _, v := range slots {
+
+		currentTokenInfo, err := pkcs11Lib.GetTokenInfo(v)
+		if err != nil {
+			panic(err)
+		}
+
+		if currentTokenInfo.Flags&uint(pkcs11.CkfTokenInitialized) == 0 {
+			res = v
+		}
+	}
+	return res
+}
+
+func initToken(slot uint) uint {
+	var currentTokenInfo, tokenInfo pk11.TokenInfo
+	var slots []uint
+	var res uint
+	pin := "1111"
+	// note : slot is just 0; should be calculated
+	err := pkcs11Lib.InitToken(slot, pin, "my_label")
+	if err != nil {
+		panic(err)
+	}
+
+	pkcs11LibSession, err = pkcs11Lib.OpenSession(slot, pk11.CKF_SERIAL_SESSION|pk11.CKF_RW_SESSION)
+	if err != nil {
+		panic(err)
+	}
+
+	err = pkcs11Lib.Login(pkcs11LibSession, pk11.CKU_SO, pin)
+	if err != nil {
+		panic(err)
+	}
+
+	err = pkcs11Lib.InitPIN(pkcs11LibSession, pin)
+	if err != nil {
+		panic(err)
+	}
+
+	currentTokenInfo, err = pkcs11Lib.GetTokenInfo(slot)
+	if err != nil {
+		panic(err)
+	}
+
+	// Reload the library
+	pkcs11Lib.Finalize()
+	err = pkcs11Lib.Initialize()
+	if err != nil {
+		log.Fatalf("failed to initialize %s: %v", pkcs11LibraryPath, err)
+	} else {
+		log.Printf("init lib %s", pkcs11LibraryPath)
+	}
+
+	// Get the slotID after reload
+
+	slots, err = pkcs11Lib.GetSlotList(true)
+	if err != nil {
+		panic(err)
+	}
+	var counter uint
+	for _, v := range slots {
+		tokenInfo, err = pkcs11Lib.GetTokenInfo(v)
+		if err != nil {
+			panic(err)
+		}
+
+		if currentTokenInfo.SerialNumber == tokenInfo.SerialNumber && currentTokenInfo.Label == tokenInfo.Label {
+			res = v
+			counter++
+		}
+	}
+
+	if counter > 1 {
+		panic("Found same tokes in multiple slots")
+	}
+	return res
+
 }
 
 func messageLoop(conn net.Conn) error {
