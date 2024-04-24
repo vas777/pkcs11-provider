@@ -1,13 +1,9 @@
+all: library
 
-RPCC := ../cmd/rpcc/rpcc
-RPC_TYPES := ../library/pkcs11_types.rpct
-RPCS := $(wildcard ../library/*.rpc)
+.PHONY: library check
 
-all: rpc.go
+library:
+	cd library; make
 
-rpc.go: ../cmd/rpcc/main.go ../cmd/rpcc/field.go $(RPC_TYPES) $(RPCS)
-	if test -x "$(RPCC)"; then \
-	  $(RPCC) -go -t $(RPC_TYPES) $(RPCS) > $@; \
-	else \
-	  touch $@; \
-	fi
+check:
+	@echo check
