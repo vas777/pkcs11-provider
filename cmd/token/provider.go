@@ -467,6 +467,59 @@ func (p *Provider) Logout() error {
 	return nil
 }
 
+func pk11AttributeToTemplate(t []*pk11.Attribute) pkcs11.Template {
+
+	var temp pkcs11.Template
+	for _, attr := range t {
+		// fmt.Printf("\u251c\u2500\u2500\u2500\u2500\u2574%d:\n", attr.Type)
+		// if len(attr.Value) > 0 {
+		// 	fmt.Printf("%s", hex.Dump(attr.Value))
+		// }
+
+		temp = append(temp, pkcs11.Attribute{
+			Type:  pkcs11.AttributeType(attr.Type),
+			Value: attr.Value,
+		})
+	}
+
+	// for _, attr := range temp {
+	// 	fmt.Printf("\u251c\u2500\u2500\u2500\u2500\u2574%d:\n", attr.Type)
+	// 	if len(attr.Value) > 0 {
+	// 		fmt.Printf("%s", hex.Dump(attr.Value))
+	// 	}
+	// }
+
+	return temp
+
+}
+
+func TemplateTopk11Attribute(t pkcs11.Template) []*pk11.Attribute {
+
+	temp := []*pk11.Attribute{}
+
+	for _, attr := range t {
+		// fmt.Printf("\u251c\u2500\u2500\u2500\u2500\u2574%s:\n", attr.Type)
+		// if len(attr.Value) > 0 {
+		// 	fmt.Printf("%s", hex.Dump(attr.Value))
+		// }
+		temp1 := pk11.Attribute{
+			Type:  uint(attr.Type),
+			Value: attr.Value[:],
+		}
+
+		temp = append(temp, &temp1)
+	}
+	// for _, attr := range temp {
+	// 	fmt.Printf("\u251c\u2500\u2500\u2500\u2500\u2574%d:\n", attr.Type)
+	// 	if len(attr.Value) > 0 {
+	// 		fmt.Printf("%s", hex.Dump(attr.Value))
+	// 	}
+	// }
+
+	return temp
+
+}
+
 // CreateObject implements the Provider.CreateObject().
 func (p *Provider) CreateObject(req *pkcs11.CreateObjectReq) (*pkcs11.CreateObjectResp, error) {
 	if p.session == nil {
@@ -515,8 +568,14 @@ func (p *Provider) CreateObject(req *pkcs11.CreateObjectReq) (*pkcs11.CreateObje
 	}
 	p.session.Objects[handle] = storage
 
+	temp := TemplateTopk11Attribute(req.Template)
+	h, err := pkcs11Lib.CreateObject(pkcs11LibSession, temp)
+	if err != nil {
+		return nil, err
+	}
+
 	return &pkcs11.CreateObjectResp{
-		Object: handle,
+		Object: pkcs11.ObjectHandle(h),
 	}, nil
 }
 
@@ -603,10 +662,14 @@ func (p *Provider) CopyObject(req *pkcs11.CopyObjectReq) (*pkcs11.CopyObjectResp
 
 // DestroyObject implements the Provider.DestroyObject().
 func (p *Provider) DestroyObject(req *pkcs11.DestroyObjectReq) error {
-	if req.Object&FlagToken != 0 {
-		return p.tokenStorage.Delete(req.Object)
+
+	err := pkcs11Lib.DestroyObject(pkcs11LibSession, pk11.ObjectHandle(req.Object))
+
+	if err != nil {
+		return err
 	}
-	return p.parent.storage.Delete(req.Object)
+
+	return nil
 }
 
 func (p *Provider) readObject(h pkcs11.ObjectHandle, errNotFound error) (
@@ -631,22 +694,14 @@ func (p *Provider) readObject(h pkcs11.ObjectHandle, errNotFound error) (
 
 // GetAttributeValue implements the Provider.GetAttributeValue().
 func (p *Provider) GetAttributeValue(req *pkcs11.GetAttributeValueReq) (*pkcs11.GetAttributeValueResp, error) {
-	obj, err := p.readObject(req.Object, pkcs11.ErrObjectHandleInvalid)
+	// pkcs11 attributes will be copied to new array with nil values
+	// so we don't need nil-out it ourselves just have correct types
+	tpk11 := TemplateTopk11Attribute(req.Template)
+	r, err := pkcs11Lib.GetAttributeValue(pkcs11LibSession, pk11.ObjectHandle(req.Object), tpk11)
 	if err != nil {
-		return nil, err
+		panic(err)
 	}
-
-	var result pkcs11.Template
-	for _, attr := range req.Template {
-		if debug {
-			fmt.Printf("\u251c\u2500\u2500\u2500\u2500\u2574%s\n", attr.Type)
-		}
-		v, _ := obj.Attrs.OptBytes(attr.Type)
-		result = append(result, pkcs11.Attribute{
-			Type:  attr.Type,
-			Value: v,
-		})
-	}
+	result := pk11AttributeToTemplate(r)
 
 	return &pkcs11.GetAttributeValueResp{
 		Template: result,
@@ -1454,81 +1509,56 @@ func (p *Provider) DigestFinal(req *pkcs11.DigestFinalReq) (*pkcs11.DigestFinalR
 
 // SignInit implements the Provider.SignInit().
 func (p *Provider) SignInit(req *pkcs11.SignInitReq) error {
-	if p.session == nil {
-		return pkcs11.ErrSessionHandleInvalid
-	}
-	if p.session.Sign != nil {
-		return pkcs11.ErrOperationActive
+
+	var m []*pk11.Mechanism
+
+	// Create Mechanism structs
+	m1 := &pk11.Mechanism{
+		Mechanism: uint(req.Mechanism.Mechanism),
+		Parameter: nil,
+		// generator: nil,
 	}
 
-	sign, err := NewSignVerify(req.Mechanism)
+	// Append pointers to Mechanism structs to the slice
+	m = append(m, m1)
+
+	h := pk11.ObjectHandle(req.Key)
+	log.Printf("req.Key %v", req.Key)
+	log.Printf("h %v", h)
+
+	err := pkcs11Lib.SignInit(pkcs11LibSession, m, h)
+	log.Printf("SignInit")
 	if err != nil {
 		return err
 	}
-
-	obj, err := p.readObject(req.Key, pkcs11.ErrKeyHandleInvalid)
-	if err != nil {
-		return err
-	}
-	// XXX Check object is valid for the operation.
-	sign.Key = obj.Native
-
-	p.session.Sign = sign
 
 	return nil
 }
 
+var globalsignature []byte
+
 // Sign implements the Provider.Sign().
 func (p *Provider) Sign(req *pkcs11.SignReq) (*pkcs11.SignResp, error) {
-	if p.session == nil {
-		return nil, pkcs11.ErrSessionHandleInvalid
-	}
-	sign := p.session.Sign
-	if sign == nil {
-		return nil, pkcs11.ErrOperationNotInitialized
-	}
-
-	resp := new(pkcs11.SignResp)
-	var signature []byte
+	// resp.SignatureLen = int(binary.BigEndian.Uint32(s))
+	var s []byte
+	var m []byte
 	var err error
+	resp := new(pkcs11.SignResp)
+	m = req.Data
 
-	switch priv := sign.Key.(type) {
-	case *rsa.PrivateKey:
-		if req.SignatureSize == 0 {
-			resp.SignatureLen = signatureLen(priv)
-			return resp, nil
-		}
-		sign.Digest.Write(req.Data)
-		digest := sign.Digest.Sum(nil)
-		signature, err = rsa.SignPKCS1v15(rand.Reader, priv, sign.Hash, digest)
+	if req.SignatureSize == 0 {
+		s, err = pkcs11Lib.Sign(pkcs11LibSession, m)
 		if err != nil {
-			Errorf("Sign: rsa.SignPKCS1v15: %s", err)
-			p.session.Sign = nil
-			return nil, pkcs11.ErrFunctionFailed
+			return nil, err
 		}
-
-	case *ecdsa.PrivateKey:
-		if req.SignatureSize == 0 {
-			resp.SignatureLen = signatureLen(priv)
-			return resp, nil
-		}
-		sign.Digest.Write(req.Data)
-		digest := sign.Digest.Sum(nil)
-		signature, err = ecdsa.SignASN1(rand.Reader, priv, digest)
-		if err != nil {
-			Errorf("Sign: ecdsa.SignASN1: %s", err)
-			p.session.Sign = nil
-			return nil, pkcs11.ErrFunctionFailed
-		}
-
-	default:
-		Errorf("Sign: sign not supported for key %T", priv)
-		p.session.Sign = nil
-		return nil, pkcs11.ErrDeviceError
+		resp.SignatureLen = len(s)
+		globalsignature = s
+		return resp, nil
 	}
 
-	resp.Signature = signature
-	resp.SignatureLen = len(signature)
+	resp.Signature = globalsignature
+	resp.SignatureLen = len(globalsignature)
+	globalsignature = nil
 	p.session.Sign = nil
 
 	return resp, nil
@@ -1536,189 +1566,93 @@ func (p *Provider) Sign(req *pkcs11.SignReq) (*pkcs11.SignResp, error) {
 
 // SignUpdate implements the Provider.SignUpdate().
 func (p *Provider) SignUpdate(req *pkcs11.SignUpdateReq) error {
-	if p.session == nil {
-		return pkcs11.ErrSessionHandleInvalid
+	err := pkcs11Lib.SignUpdate(pkcs11LibSession, req.Part)
+	if err != nil {
+		return err
 	}
-	sign := p.session.Sign
-	if sign == nil {
-		return pkcs11.ErrOperationNotInitialized
-	}
-	sign.Digest.Write(req.Part)
 	return nil
 }
 
+var gloablsigfinal []byte
+
 // SignFinal implements the Provider.SignFinal().
 func (p *Provider) SignFinal(req *pkcs11.SignFinalReq) (*pkcs11.SignFinalResp, error) {
-	if p.session == nil {
-		return nil, pkcs11.ErrSessionHandleInvalid
-	}
-	sign := p.session.Sign
-	if sign == nil {
-		return nil, pkcs11.ErrOperationNotInitialized
-	}
 
 	resp := new(pkcs11.SignFinalResp)
 	var signature []byte
 	var err error
 
-	switch priv := sign.Key.(type) {
-	case *rsa.PrivateKey:
-		if req.SignatureSize == 0 {
-			resp.SignatureLen = signatureLen(priv)
-			return resp, nil
-		}
-		digest := sign.Digest.Sum(nil)
-		signature, err = rsa.SignPKCS1v15(rand.Reader, priv, sign.Hash, digest)
+	if req.SignatureSize == 0 {
+		signature, err = pkcs11Lib.SignFinal(pkcs11LibSession)
 		if err != nil {
-			Errorf("SignFinal: rsa.SignPKCS1v15: %s", err)
-			p.session.Sign = nil
-			return nil, pkcs11.ErrFunctionFailed
+			return nil, err
 		}
-
-	case *ecdsa.PrivateKey:
-		if req.SignatureSize == 0 {
-			resp.SignatureLen = signatureLen(priv)
-			return resp, nil
-		}
-		digest := sign.Digest.Sum(nil)
-		signature, err = ecdsa.SignASN1(rand.Reader, priv, digest)
-		if err != nil {
-			Errorf("Sign: ecdsa.SignASN1: %s", err)
-			p.session.Sign = nil
-			return nil, pkcs11.ErrFunctionFailed
-		}
-
-	default:
-		Errorf("SignFinal: sign not supported for key %T", priv)
-		p.session.Sign = nil
-		return nil, pkcs11.ErrDeviceError
+		resp.SignatureLen = len(signature)
+		gloablsigfinal = signature
+		return resp, nil
 	}
 
-	resp.Signature = signature
-	resp.SignatureLen = len(signature)
-	p.session.Sign = nil
+	log.Printf("SignFinal")
 
+	resp.Signature = gloablsigfinal
+	resp.SignatureLen = len(gloablsigfinal)
+	p.session.Sign = nil
+	gloablsigfinal = nil
 	return resp, nil
 }
 
 // VerifyInit implements the Provider.VerifyInit().
 func (p *Provider) VerifyInit(req *pkcs11.VerifyInitReq) error {
-	if p.session == nil {
-		return pkcs11.ErrSessionHandleInvalid
-	}
-	if p.session.Verify != nil {
-		return pkcs11.ErrOperationActive
+	var m []*pk11.Mechanism
+
+	// Create Mechanism structs
+	m1 := &pk11.Mechanism{
+		Mechanism: uint(req.Mechanism.Mechanism),
+		Parameter: nil,
+		// generator: nil,
 	}
 
-	verify, err := NewSignVerify(req.Mechanism)
+	// Append pointers to Mechanism structs to the slice
+	m = append(m, m1)
+
+	h := pk11.ObjectHandle(req.Key)
+	log.Printf("req.Key %v", req.Key)
+	log.Printf("h %v", h)
+
+	err := pkcs11Lib.VerifyInit(pkcs11LibSession, m, h)
+	log.Printf("SignInit")
 	if err != nil {
 		return err
 	}
-
-	obj, err := p.readObject(req.Key, pkcs11.ErrKeyHandleInvalid)
-	if err != nil {
-		return err
-	}
-	// XXX Check object is valid for the operation.
-	verify.Key = obj.Native
-
-	p.session.Verify = verify
 
 	return nil
 }
 
 // Verify implements the Provider.Verify().
 func (p *Provider) Verify(req *pkcs11.VerifyReq) error {
-	if p.session == nil {
-		return pkcs11.ErrSessionHandleInvalid
+
+	err := pkcs11Lib.Verify(pkcs11LibSession, req.Data, req.Signature)
+	if err != nil {
+		return err
 	}
-	verify := p.session.Verify
-	if verify == nil {
-		return pkcs11.ErrOperationNotInitialized
-	}
-
-	switch pub := verify.Key.(type) {
-	case *rsa.PublicKey:
-		verify.Digest.Write(req.Data)
-		digest := verify.Digest.Sum(nil)
-		err := rsa.VerifyPKCS1v15(pub, verify.Hash, digest, req.Signature)
-		if err != nil {
-			Errorf("Verify: rsa.VerifyPKCS1v15: %s", err)
-			p.session.Verify = nil
-			return pkcs11.ErrSignatureInvalid
-		}
-
-	case *ecdsa.PublicKey:
-		verify.Digest.Write(req.Data)
-		digest := verify.Digest.Sum(nil)
-		if !ecdsa.VerifyASN1(pub, digest, req.Signature) {
-			Errorf("Verify: ecdsa.VerifyASN1 failed")
-			p.session.Verify = nil
-			return pkcs11.ErrSignatureInvalid
-		}
-
-	default:
-		Errorf("Verify: verify not supported for key %T", pub)
-		p.session.Verify = nil
-		return pkcs11.ErrDeviceError
-	}
-
-	p.session.Verify = nil
-
 	return nil
 }
 
 // VerifyUpdate implements the Provider.VerifyUpdate().
 func (p *Provider) VerifyUpdate(req *pkcs11.VerifyUpdateReq) error {
-	if p.session == nil {
-		return pkcs11.ErrSessionHandleInvalid
+	err := pkcs11Lib.VerifyUpdate(pkcs11LibSession, req.Part)
+	if err != nil {
+		return err
 	}
-	verify := p.session.Verify
-	if verify == nil {
-		return pkcs11.ErrOperationNotInitialized
-	}
-
-	verify.Digest.Write(req.Part)
-
 	return nil
 }
 
 // VerifyFinal implements the Provider.VerifyFinal().
 func (p *Provider) VerifyFinal(req *pkcs11.VerifyFinalReq) error {
-	if p.session == nil {
-		return pkcs11.ErrSessionHandleInvalid
+	err := pkcs11Lib.VerifyFinal(pkcs11LibSession, req.Signature)
+	if err != nil {
+		return err
 	}
-	verify := p.session.Verify
-	if verify == nil {
-		return pkcs11.ErrOperationNotInitialized
-	}
-
-	switch pub := verify.Key.(type) {
-	case *rsa.PublicKey:
-		digest := verify.Digest.Sum(nil)
-		err := rsa.VerifyPKCS1v15(pub, verify.Hash, digest, req.Signature)
-		if err != nil {
-			Errorf("rsa.VerifyPKCS1v15: %s", err)
-			p.session.Verify = nil
-			return pkcs11.ErrSignatureInvalid
-		}
-
-	case *ecdsa.PublicKey:
-		digest := verify.Digest.Sum(nil)
-		if !ecdsa.VerifyASN1(pub, digest, req.Signature) {
-			Errorf("ecdsa.VerifyASN1 failed")
-			p.session.Verify = nil
-			return pkcs11.ErrSignatureInvalid
-		}
-
-	default:
-		Errorf("verify not supported for key %T", pub)
-		p.session.Verify = nil
-		return pkcs11.ErrDeviceError
-	}
-
-	p.session.Verify = nil
-
 	return nil
 }
 
@@ -1805,15 +1739,82 @@ func (p *Provider) GenerateKey(req *pkcs11.GenerateKeyReq) (*pkcs11.GenerateKeyR
 
 // GenerateKeyPair implements the Provider.GenerateKeyPair().
 func (p *Provider) GenerateKeyPair(req *pkcs11.GenerateKeyPairReq) (*pkcs11.GenerateKeyPairResp, error) {
+	var pubattr, prvattr []*pk11.Attribute = nil, nil
+	var pubHandle, privHandle pk11.ObjectHandle
+	var m []*pk11.Mechanism
+
+	// Create Mechanism structs
+	m1 := &pk11.Mechanism{
+		Mechanism: uint(req.Mechanism.Mechanism),
+		Parameter: nil,
+		// generator: nil,
+	}
+
+	// Append pointers to Mechanism structs to the slice
+	m = append(m, m1)
+
+	token, err := req.PrivateKeyTemplate.OptBool(pkcs11.CkaToken)
+	if err != nil {
+		return nil, err
+	}
+	private, err := req.PrivateKeyTemplate.OptBool(pkcs11.CkaPrivate)
+	if err != nil {
+		return nil, err
+	}
+
+	bits, err := req.PublicKeyTemplate.Int(pkcs11.CkaModulusBits)
+	if err != nil {
+		return nil, err
+	}
+	// e, err := req.PublicKeyTemplate.BigInt(pkcs11.CkaPublicExponent)
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	ee := []byte{0x01, 0x00, 0x01}
+	pubattr = []*pk11.Attribute{
+		pk11.NewAttribute(pk11.CKA_TOKEN, token),
+		pk11.NewAttribute(pk11.CKA_PRIVATE, private),
+		pk11.NewAttribute(pk11.CKA_ENCRYPT, true),
+		pk11.NewAttribute(pk11.CKA_VERIFY, true),
+		pk11.NewAttribute(pk11.CKA_WRAP, true),
+		// pk11.NewAttribute(pk11.CKA_ID, nil),
+		pk11.NewAttribute(pk11.CKA_PUBLIC_EXPONENT, ee),
+		pk11.NewAttribute(pk11.CKA_MODULUS_BITS, bits),
+		// pk11.NewAttribute(pk11.CKA_MODULUS, nil),
+	}
+
+	prvattr = []*pk11.Attribute{
+		pk11.NewAttribute(pk11.CKA_TOKEN, token),
+		pk11.NewAttribute(pk11.CKA_PRIVATE, private),
+		pk11.NewAttribute(pk11.CKA_SENSITIVE, true),
+		pk11.NewAttribute(pk11.CKA_EXTRACTABLE, true),
+		pk11.NewAttribute(pk11.CKA_DECRYPT, true),
+		pk11.NewAttribute(pk11.CKA_SIGN, true),
+		pk11.NewAttribute(pk11.CKA_UNWRAP, true),
+	}
+
+	pubHandle, privHandle, err = pkcs11Lib.GenerateKeyPair(pkcs11LibSession, m, pubattr, prvattr)
+	if err != nil {
+		panic(err)
+	}
+
+	log.Printf("pubHandle %v", pubHandle)
+	log.Printf("privHandle %v", privHandle)
+
+	return &pkcs11.GenerateKeyPairResp{
+		PublicKey:  pkcs11.ObjectHandle(pubHandle),
+		PrivateKey: pkcs11.ObjectHandle(privHandle),
+	}, nil
+
+	// ------------ //
+
 	info, ok := mechanisms[req.Mechanism.Mechanism]
 	if !ok {
 		Errorf("%s: unknown mechanism", req.Mechanism.Mechanism)
 		return nil, pkcs11.ErrMechanismInvalid
 	}
-	token, err := req.PrivateKeyTemplate.OptBool(pkcs11.CkaToken)
-	if err != nil {
-		return nil, err
-	}
+
 	var storage pkcs11.Storage
 	if token {
 		storage = p.tokenStorage

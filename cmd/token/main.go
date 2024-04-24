@@ -285,7 +285,7 @@ func main() {
 	// then token is initialized to used that slot
 	// library reloaded to get new slotid
 	// slotid might change but we have tokeninfo
-	// so we could correctly find our original token with new id
+	// so we could correctly find our original slot with new id
 	err = pkcs11Lib.Initialize()
 	if err != nil {
 		log.Fatalf("failed to initialize %s: %v", pkcs11LibraryPath, err)
